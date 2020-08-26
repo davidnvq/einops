@@ -1,5 +1,8 @@
 import functools
 import itertools
+import re
+import torch
+import numpy as np
 from collections import OrderedDict
 from typing import Tuple, List, Set, Dict
 
@@ -49,6 +52,7 @@ def _optimize_transformation(init_shapes, reduced_axes, axes_reordering, final_s
             init_shapes[removed_axis - 1] *= removed_length
             reduced_axes = reduced_axes[:i + 1] + tuple(axis - 1 for axis in reduced_axes[i + 2:])
 
+
     # removing axes that are moved together during reshape
     def build_mapping():
         init_to_final = {}
@@ -59,6 +63,7 @@ def _optimize_transformation(init_shapes, reduced_axes, axes_reordering, final_s
                 after_reduction = sum(x is not None for x in init_to_final.values())
                 init_to_final[axis] = list(axes_reordering).index(after_reduction)
         return init_to_final
+
 
     init_axis_to_final_axis = build_mapping()
 
@@ -94,6 +99,8 @@ class TransformRecipe:
     Recipe describes actual computation pathway.
     Recipe can be applied to a tensor or variable.
     """
+
+
     # structure is non-mutable. In future, this can be non-mutable dataclass (python 3.7+)
 
     def __init__(self,
@@ -127,6 +134,7 @@ class TransformRecipe:
         # This is redundant information, but more convenient during to use in reconstruction
         self.reduced_elementary_axes = reduced_elementary_axes
         self.ellipsis_positions = ellipsis_positions
+
 
     @functools.lru_cache(maxsize=1024)
     def reconstruct_from_shape(self, shape, optimize=False):
@@ -194,6 +202,7 @@ class TransformRecipe:
         else:
             return init_shapes, reduced_axes, axes_reordering, added_axes, final_shapes
 
+
     def apply(self, tensor):
         backend = get_backend(tensor)
         init_shapes, reduced_axes, axes_reordering, added_axes, final_shapes = self.reconstruct_from_shape(
@@ -226,6 +235,7 @@ def parse_expression(expression: str) -> Tuple[Set[str], List[CompositeAxis]]:
 
     bracket_group = None
 
+
     def add_axis_name(x):
         if x is not None:
             if x in identifiers:
@@ -235,6 +245,7 @@ def parse_expression(expression: str) -> Tuple[Set[str], List[CompositeAxis]]:
                 composite_axes.append([x])
             else:
                 bracket_group.append(x)
+
 
     current_identifier = None
     for char in expression:
@@ -400,9 +411,9 @@ def _prepare_transformation_recipe(pattern: str, operation: str, axes_lengths: T
 def reduce(tensor, pattern: str, reduction: str, **axes_lengths: int):
     """
     einops.reduce provides combination of reordering and reduction using reader-friendly notation.
-    
+
     Examples for reduce operation:
-    
+
     >>> x = np.random.randn(100, 32, 64)
     >>> # perform max-reduction on the first axis
     >>> y = reduce(x, 't b c -> b c', 'max')
@@ -424,8 +435,8 @@ def reduce(tensor, pattern: str, reduction: str, **axes_lengths: int):
     >>> # Subtracting mean over batch for each channel
     >>> y = x - reduce(x, 'b c h w -> () c () ()', 'mean')
     >>> # Subtracting per-image mean for each channel
-    >>> y = x - reduce(x, 'b c h w -> b c () ()', 'mean') 
-    
+    >>> y = x - reduce(x, 'b c h w -> b c () ()', 'mean')
+
     :param tensor: tensor: tensor of any supported library (e.g. numpy.ndarray, tensorflow, pytorch, mxnet.ndarray).
             list of tensors is also accepted, those should be of the same type and shape
     :param pattern: string, reduction pattern
@@ -591,3 +602,247 @@ def asnumpy(tensor):
     :return: numpy.ndarray, converted to numpy
     """
     return get_backend(tensor).to_numpy(tensor)
+
+
+def _concatenate(tensor_list, dim=0):
+    framework_name = get_backend(tensor_list[0]).framework_name
+
+    if framework_name == 'torch':
+        return torch.cat(tensor_list, dim=dim)
+
+    if framework_name == 'numpy':
+        return np.concatenate(tensor_list, axis=dim)
+
+
+def transpose(tensor, dim1, dim2):
+    """Transpose 2 dimensions `dim1` and `dim2` in `tensor`.
+    It also support the case `dim1` = `dim2`.
+    """
+    framework_name = get_backend(tensor).framework_name
+
+    if framework_name == 'torch':
+        return torch.transpose(tensor, dim1, dim2)
+
+    if framework_name == 'numpy':
+        return np.swapaxes(tensor, dim1, dim2)
+
+
+def _split_pattern(pattern: str):
+    """This split the pattern "A B [(x y) -> (y x)] C D" into 4 parts:
+    left: "A B"
+    rght: "C D"
+    dim_left: "(x y)"
+    dim_rght: "(y z)"
+    """
+    dim_pattern = re.search(r"\[(.*)\]", pattern).group(1)
+    dim_left, dim_rght = dim_pattern.split("->")
+
+    assert len(dim_left) > 0, "Nothing on left side of dimension pattern"
+    assert len(dim_rght) > 0, "Nothing on rght side of dimension pattern"
+
+    left = re.search(r"(.*)\[", pattern).group(1)
+    rght = re.search(r"\](.*)", pattern).group(1)
+    return left, rght, dim_left, dim_rght
+
+
+def concat(tensor_list, pattern, **axes_lengths: int):
+    """This performs the concatenation of tensors along 1 axis.
+    Args:
+        tensor_list:(List[torch.Tensor/np.Array]) list of tensors have same length on all dimensions (except concat dim)
+        pattern: (str) pattern to redimension, e.g., "batch seq [dx dy dz -> (dx dy dz)]"
+        **axes_lengths: optional lengths of axes, B=10, H=300, W=600
+    Returns:
+        a concatenated tensor
+
+    Note that:
+    1. Except for the concatenated axis, the lengths of the other axes must be the same.
+    2. It is not necessary for all tensors to have the same length, they can be different.
+    3. We DONT need to specify all the lengths of dimensions.
+
+    Example: CONCATENATE
+    >>> x = torch.randn(2, 10, 512)
+    >>> y = torch.randn(2, 10, 128)
+    >>> z = torch.randn(2, 10, 256)
+    >>> h = concat([x, y, z], "batch seq [dx dy dz -> (dx dy dz)]", batch=2, seq=10, dx=512, dy=128, dz=256)
+
+    Other Note:
+    We can use `ellipsis` when we dont want to list all dimension names along this axis
+
+    Example: CONCATENATE
+    >>> h = concat([x, y, z], "batch seq [... -> ...]")
+    >>> h = concat([x, y, z], "batch seq [... -> d]")
+    """
+
+    left, rght, dim_left, dim_rght = _split_pattern(pattern)
+
+    identifiers_left, composite_axes_left = parse_expression(left)
+    identifiers_rght, composite_axes_rght = parse_expression(rght)
+
+    identifiers_dim_left, composite_elem_dim_left = parse_expression(dim_left)
+    identifiers_dim_rght, composite_elem_dim_rght = parse_expression(dim_rght)
+
+    known_dim_lengths = {known_elem: axes_lengths[known_elem]
+                         for known_elem in axes_lengths if known_elem in list(identifiers_dim_left)}
+
+    for tensor_idx, tensor in enumerate(tensor_list):
+        tensor_axes_lengths = tensor.shape
+        assert len(identifiers_left) + len(identifiers_rght) + 1 == len(tensor_axes_lengths)
+
+        for known_axis in axes_lengths:
+            identifiers = list(identifiers_left) + list(identifiers_dim_left) + list(identifiers_dim_rght) + list(
+                identifiers_rght)
+            assert known_axis in identifiers, f"{known_axis} does not appear in dimension names!"
+
+        mismatch_error = "length of axis {} has value {}, does not match {}"
+
+        # check left dimension match
+        for i, axis_name in enumerate(list(identifiers_left)):
+            if axis_name in axes_lengths:
+                axis_len = axes_lengths[axis_name]
+                tensor_axis_len = tensor_axes_lengths[i]
+                assert tensor_axis_len == axis_len, mismatch_error.format(axis_name, axis_len, tensor_axis_len)
+
+        # check rght dimension match
+        for i, axis_name in enumerate(list(identifiers_rght)):
+            if axis_name in axes_lengths:
+                axis_len = axes_lengths[axis_name]
+                tensor_axis_len = tensor_axes_lengths[-len(composite_axes_rght) + i]
+                assert tensor_axis_len == axis_len, mismatch_error.format(axis_name, axis_len, tensor_axis_len)
+
+        # interested axis
+        dim_idx = len(identifiers_left)
+
+        # check dimension length on the concatenated dimension
+        if _ellipsis not in identifiers_dim_left:
+            elem_name = composite_elem_dim_left[tensor_idx][0]
+            if elem_name in known_dim_lengths:
+                elem_len = known_dim_lengths[elem_name]
+                tensor_elem_len = tensor_axes_lengths[dim_idx]
+                assert elem_len == tensor_elem_len, mismatch_error.format(elem_name, elem_len, tensor_elem_len)
+
+    # check ellipsis cases
+    if _ellipsis in identifiers_dim_left:
+        assert len(
+            identifiers_dim_left) == 1, "You can only 1 name on the left side of concat dimension when using ellipsis"
+        assert len(
+            identifiers_dim_rght) == 1, "You can only 1 name on the rght side of concat dimension when using ellipsis"
+
+        # check whether `d` = the concatenated dimension length in case [... -> d]
+        if _ellipsis not in identifiers_dim_rght:
+            dim_name = identifiers_dim_rght.pop()
+            if dim_name in axes_lengths:
+                concat_dim_len = sum([tensor.shape[dim_idx] for tensor in tensor_list])
+                dim_len = axes_lengths[dim_name]
+                dim_len == concat_dim_len, "The length {dim_name} = {dim_len} must match the length of concat dim, {concat_dim_len}"
+
+    res = _concatenate(tensor_list, dim=dim_idx)
+    return res
+
+
+def redim(tensor, pattern, **axes_lengths: int):
+    """This performs redimension elements on 1 specific dimension, e.g., chunking or reordering.
+    The operation is performed by the pattern within the bracket.
+    Note that: It only supports a single pattern so far, and there must be a single group/element on that dimension
+
+    Args:
+        tensor: (torch.Tensor or np.Array)
+        pattern: pattern to redimension, e.g., "B H W [(r g b) -> (b g r)]"
+        **axes_lengths: optional lengths of axes, B=10, H=300, W=600
+    Returns:
+        a re-dimensioned tensor
+
+    Example: REORDER
+    >>> image = np.random.randn(30, 40, 3) # RGB
+    # change it to RGB -> BGR
+    # It is not necessary to specify the length of other axes, only for `assert` purpose
+    # When element length = 1, or can be infered from the context, we also don't need to specify
+
+    >>> image = redim(image, "height width [(r g b) -> (b g r)]", height=30, width=40, r=1, g=1, b=1)
+
+    Example: CHUNKING
+    # Split dataset into train and validation set
+    >>> train_set = redim(dataset, "[(train valid) -> train] H W", train=800, valid=200)
+    >>> valid_set = redim(dataset, "[(train valid) -> valid] H W", train=800, valid=200)
+
+    # Remove alpha channel
+    >>> image = np.random.randn(30, 40, 4) # RGBA
+    >>> image = redim(image, "H W [(rgb a) -> rgb]", rgb=3) # or the below
+    >>> image = redim(image, "H W [(r g b a) -> (r g b)]")
+
+    # Crop the image
+    >>> image = redim(image, "[(top down) -> top] W", top=20)
+    >>> image = redim(image, "H [left right]", left=10)
+    """
+
+    left, rght, dim_left, dim_rght = _split_pattern(pattern)
+
+    identifiers_left, composite_axes_left = parse_expression(left)
+    identifiers_rght, composite_axes_rght = parse_expression(rght)
+
+    identifiers_dim_left, composite_elem_dim_left = parse_expression(dim_left)
+    identifiers_dim_rght, composite_elem_dim_rght = parse_expression(dim_rght)
+
+    tensor_axes_lengths = tensor.shape
+    assert len(identifiers_left) + len(identifiers_rght) + 1 == len(tensor_axes_lengths)
+
+    for known_axis in axes_lengths:
+        identifiers = list(identifiers_left) + list(identifiers_dim_left) + list(identifiers_dim_rght) + list(
+            identifiers_rght)
+        assert known_axis in identifiers, f"{known_axis} does not appear in dimension names!"
+
+    mismatch_error = "length of axis {} has value {}, does not match {}"
+    # check left dimension match
+    for i, axis_name in enumerate(list(identifiers_left)):
+        if axis_name in axes_lengths:
+            axis_len = axes_lengths[axis_name]
+            tensor_axis_len = tensor_axes_lengths[i]
+            assert tensor_axis_len == axis_len, mismatch_error.format(axis_name, axis_len, tensor_axis_len)
+
+    # check rght dimension match
+    for i, axis_name in enumerate(list(identifiers_rght)):
+        if axis_name in axes_lengths:
+            axis_len = axes_lengths[axis_name]
+            tensor_axis_len = tensor_axes_lengths[-len(composite_axes_rght) + i]
+            assert tensor_axis_len == axis_len, mismatch_error.format(axis_name, axis_len, tensor_axis_len)
+
+    left_dim_elems = list(identifiers_dim_left)
+
+    assert len(composite_elem_dim_left) == 1, "The left pattern on dimension must have 1 group only"
+    assert len(composite_elem_dim_rght) == 1, "The rght pattern on dimension must have 1 group only"
+
+    dim_len = tensor_axes_lengths[len(identifiers_left)]
+    known_dim_lengths = {known_elem: axes_lengths[known_elem]
+                         for known_elem in axes_lengths if known_elem in left_dim_elems}
+
+    num_unknown_elems = len(left_dim_elems) - len(known_dim_lengths)
+    remain_dim_len = dim_len - sum([known_dim_lengths[axis_name] for axis_name in known_dim_lengths])
+
+    if num_unknown_elems == 1:
+        unknown_dim_lengths = {elem: remain_dim_len for elem in left_dim_elems if elem not in known_dim_lengths}
+    elif num_unknown_elems == remain_dim_len:
+        unknown_dim_lengths = {elem: 1 for elem in left_dim_elems if elem not in known_dim_lengths}
+
+    known_dim_lengths.update(unknown_dim_lengths)
+
+    # interested axis
+    dim_idx = len(identifiers_left)
+
+    # move the axis of interest to the front
+    transposed_tensor = transpose(tensor, 0, dim_idx)
+
+    cum_idx = 0
+    out = {}
+    for elem in composite_elem_dim_left[0]:
+        elem_len = known_dim_lengths[elem]
+
+        out[elem] = transposed_tensor[cum_idx:cum_idx + elem_len]
+
+        cum_idx += elem_len
+
+    res = [out[elem] for elem in composite_elem_dim_rght[0]]
+    res = _concatenate(res, dim=0)
+
+    # move the axis of interest back to original
+    res = transpose(res, 0, dim_idx)
+
+    return res
