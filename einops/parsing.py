@@ -125,3 +125,74 @@ class ParsedExpression:
             return result
         else:
             return result[0]
+
+
+CompositeAxis = List[str]
+
+
+def parse_expression(expression: str) -> Tuple[Set[str], List[CompositeAxis]]:
+    """
+    Parses an indexing expression (for a single tensor).
+    Checks uniqueness of names, checks usage of '...' (allowed only once)
+    Returns set of all used identifiers and a list of axis groups.
+    """
+    identifiers = set()
+    composite_axes = []
+    if '.' in expression:
+        if '...' not in expression:
+            raise EinopsError('Expression may contain dots only inside ellipsis (...)')
+        if str.count(expression, '...') != 1 or str.count(expression, '.') != 3:
+            raise EinopsError('Expression may contain dots only inside ellipsis (...); only one ellipsis for tensor ')
+        expression = expression.replace('...', _ellipsis)
+
+    bracket_group = None
+
+
+    def add_axis_name(x):
+        if x is not None:
+            if x in identifiers:
+                raise ValueError('Indexing expression contains duplicate dimension "{}"'.format(x))
+            identifiers.add(x)
+            if bracket_group is None:
+                composite_axes.append([x])
+            else:
+                bracket_group.append(x)
+
+
+    current_identifier = None
+    for char in expression:
+        if char in '() ' + _ellipsis:
+            add_axis_name(current_identifier)
+            current_identifier = None
+            if char == _ellipsis:
+                if bracket_group is not None:
+                    raise EinopsError("Ellipsis can't be used inside the composite axis (inside brackets)")
+                composite_axes.append(_ellipsis)
+                identifiers.add(_ellipsis)
+            elif char == '(':
+                if bracket_group is not None:
+                    raise EinopsError("Axis composition is one-level (brackets inside brackets not allowed)")
+                bracket_group = []
+            elif char == ')':
+                if bracket_group is None:
+                    raise EinopsError('Brackets are not balanced')
+                composite_axes.append(bracket_group)
+                bracket_group = None
+        elif '0' <= char <= '9':
+            if current_identifier is None:
+                raise EinopsError("Axis name can't start with a digit")
+            current_identifier += char
+        elif 'a' <= char <= 'z':
+            if current_identifier is None:
+                current_identifier = char
+            else:
+                current_identifier += char
+        else:
+            if 'A' <= char <= 'Z':
+                raise EinopsError("Only lower-case latin letters allowed in names, not '{}'".format(char))
+            raise EinopsError("Unknown character '{}'".format(char))
+
+    if bracket_group is not None:
+        raise EinopsError('Imbalanced parentheses in expression: "{}"'.format(expression))
+    add_axis_name(current_identifier)
+    return identifiers, composite_axes
