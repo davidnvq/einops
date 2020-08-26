@@ -1,6 +1,7 @@
 from einops import EinopsError
 import keyword
 import warnings
+from typing import Tuple, Set, List, Dict, Union, Callable
 
 _ellipsis = '…'  # NB, this is a single unicode symbol. String is used as it is not a list, but can be iterated
 
@@ -130,13 +131,13 @@ class ParsedExpression:
 CompositeAxis = List[str]
 
 
-def parse_expression(expression: str) -> Tuple[Set[str], List[CompositeAxis]]:
+def parse_expression(expression: str) -> Tuple[List[str], List[CompositeAxis]]:
     """
     Parses an indexing expression (for a single tensor).
     Checks uniqueness of names, checks usage of '...' (allowed only once)
     Returns set of all used identifiers and a list of axis groups.
     """
-    identifiers = set()
+    identifiers = list()
     composite_axes = []
     if '.' in expression:
         if '...' not in expression:
@@ -152,7 +153,7 @@ def parse_expression(expression: str) -> Tuple[Set[str], List[CompositeAxis]]:
         if x is not None:
             if x in identifiers:
                 raise ValueError('Indexing expression contains duplicate dimension "{}"'.format(x))
-            identifiers.add(x)
+            identifiers.append(x)
             if bracket_group is None:
                 composite_axes.append([x])
             else:
@@ -168,7 +169,7 @@ def parse_expression(expression: str) -> Tuple[Set[str], List[CompositeAxis]]:
                 if bracket_group is not None:
                     raise EinopsError("Ellipsis can't be used inside the composite axis (inside brackets)")
                 composite_axes.append(_ellipsis)
-                identifiers.add(_ellipsis)
+                identifiers.append(_ellipsis)
             elif char == '(':
                 if bracket_group is not None:
                     raise EinopsError("Axis composition is one-level (brackets inside brackets not allowed)")
