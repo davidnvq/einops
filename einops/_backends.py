@@ -111,7 +111,7 @@ class AbstractBackend:
         # Decided to drop average for all backends if type is not floating
         raise NotImplementedError()
 
-    def layers(self, x):
+    def layers(self):
         raise NotImplementedError("backend does not provide layers")
 
     def __repr__(self):
@@ -268,7 +268,7 @@ class MXNetBackend(AbstractBackend):
         if len(shape) == 0:
             return x  # poor support of scalars in mxnet
         if any(isinstance(dimension, UnknownSize) for dimension in shape):
-            from .einops import EinopsError
+            from einops import EinopsError
             raise EinopsError("Mxnet could't infer all dimensions statically, please provide those with axes_lengths")
         return x.reshape(shape)
 

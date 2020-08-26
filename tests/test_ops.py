@@ -1,8 +1,10 @@
 import itertools
 
 import numpy
+from nose.tools import assert_raises
 
-from einops.einops import (rearrange, reduce, parse_shape, _enumerate_directions, _reductions)
+from einops import EinopsError
+from einops.einops import (rearrange, reduce, _enumerate_directions, _reductions)
 from . import collect_test_backends
 
 imp_op_backends = collect_test_backends(symbolic=False, layers=False)
@@ -16,19 +18,35 @@ identity_patterns = [
     '... a b c d e -> ... a b c d e',
     'a ... e-> a ... e',
     'a ... -> a ... ',
+    'a ... c d e -> a (...) c d e',
 ]
 
 equivalent_rearrange_patterns = [
     ('a b c d e -> (a b) c d e', 'a b ... -> (a b) ... '),
     ('a b c d e -> a b (c d) e', '... c d e -> ... (c d) e'),
     ('a b c d e -> a b c d e', '... -> ... '),
+    ('a b c d e -> (a b c d e)', '... ->  (...)'),
+    ('a b c d e -> b (c d e) a', 'a b ... -> b (...) a'),
+    ('a b c d e -> b (a c d) e', 'a b ... e -> b (a ...) e'),
 ]
 
 equivalent_reduction_patterns = [
     ('a b c d e -> ', ' ... ->  '),
     ('a b c d e -> (e a)', 'a ... e -> (e a)'),
     ('a b c d e -> d (a e)', ' a b c d e ... -> d (a e) '),
+    ('a b c d e -> (a b)', ' ... c d e  -> (...) '),
 ]
+
+
+def test_collapsed_ellipsis_errors_out():
+    x = numpy.zeros([1, 1, 1, 1, 1])
+    rearrange(x, 'a b c d ... ->  a b c ... d')
+    with assert_raises(EinopsError):
+        rearrange(x, 'a b c d (...) ->  a b c ... d')
+
+    rearrange(x, '... ->  (...)')
+    with assert_raises(EinopsError):
+        rearrange(x, '(...) -> (...)')
 
 
 def test_ellipsis_ops_numpy():
@@ -66,7 +84,7 @@ def check_op_against_numpy(backend, numpy_input, pattern, axes_lengths, reductio
     check_equal = numpy.array_equal
     p_none_dimension = 0.5
     if 'mxnet' in backend.framework_name:
-        # known mxnet bug cant work with scalars - allclose
+        # known bug in mxnet: it cant work with scalars - so use allclose instead
         check_equal = numpy.allclose
         # mxnet can't work unless shape is completely specified
         p_none_dimension = 0
@@ -88,12 +106,13 @@ def test_ellipsis_ops_imperative():
     for is_symbolic in [True, False]:
         for backend in collect_test_backends(symbolic=is_symbolic, layers=False):
             for pattern in identity_patterns + list(itertools.chain(*equivalent_rearrange_patterns)):
-                check_op_against_numpy(backend, x, pattern, axes_lengths={}, is_symbolic=is_symbolic)
+                check_op_against_numpy(backend, x, pattern, axes_lengths={},
+                                       reduction='rearrange', is_symbolic=is_symbolic)
 
             for reduction in ['min', 'max', 'sum']:
                 for pattern in itertools.chain(*equivalent_reduction_patterns):
-                    check_op_against_numpy(backend, x, pattern,
-                                           axes_lengths={}, reduction=reduction, is_symbolic=is_symbolic)
+                    check_op_against_numpy(backend, x, pattern, axes_lengths={},
+                                           reduction=reduction, is_symbolic=is_symbolic)
 
 
 def test_rearrange_consistency_numpy():
@@ -134,7 +153,8 @@ def test_rearrange_consistency_numpy():
     assert x2[0, 1, 2] == result[1, 2, 0]
 
 
-def test_rearrange_numpy_element_wise():
+def test_rearrange_permutations_numpy():
+    # tests random permutation of axes against two independent numpy ways
     for n_axes in range(1, 10):
         input = numpy.arange(2 ** n_axes).reshape([2] * n_axes)
         permutation = numpy.random.permutation(n_axes)
@@ -165,20 +185,27 @@ def test_reduction_imperatives():
     for backend in imp_op_backends:
         print('Reduction tests for ', backend.framework_name)
         for reduction in _reductions:
-            input = numpy.arange(2 * 3 * 4 * 5 * 6, dtype='int64').reshape(2, 3, 4, 5, 6)
+            # slight redundancy for simpler order - numpy version is evaluated multiple times
+            input = numpy.arange(2 * 3 * 4 * 5 * 6, dtype='int64').reshape([2, 3, 4, 5, 6])
             if reduction in ['mean', 'prod']:
                 input = input / input.astype('float64').mean()
             test_cases = [
-                ['a b c d e -> ', {}, getattr(input, reduction)()],
-                ['... -> ', {}, getattr(input, reduction)()],
-                ['(a1 a2) ... (e1 e2) -> ', dict(a1=1, e2=2), getattr(input, reduction)()],
-                ['a b c d e -> (e c) a', {}, getattr(input, reduction)(axis=(1, 3)).transpose(2, 1, 0).reshape(-1, 2)],
+                ['a b c d e -> ', {},
+                 getattr(input, reduction)()],
+                ['a ... -> ', {},
+                 getattr(input, reduction)()],
+                ['(a1 a2) ... (e1 e2) -> ', dict(a1=1, e2=2),
+                 getattr(input, reduction)()],
+                ['a b c d e -> (e c) a', {},
+                 getattr(input, reduction)(axis=(1, 3)).transpose(2, 1, 0).reshape([-1, 2])],
                 ['a ... c d e -> (e c) a', {},
-                 getattr(input, reduction)(axis=(1, 3)).transpose(2, 1, 0).reshape(-1, 2)],
+                 getattr(input, reduction)(axis=(1, 3)).transpose(2, 1, 0).reshape([-1, 2])],
                 ['a b c d e ... -> (e c) a', {},
-                 getattr(input, reduction)(axis=(1, 3)).transpose(2, 1, 0).reshape(-1, 2)],
-                ['a b c d e -> (e c a)', {}, getattr(input, reduction)(axis=(1, 3)).transpose(2, 1, 0).reshape(-1)],
-                ['(a1 a2) ... -> (a2 a1) ...', dict(a2=1), input],
+                 getattr(input, reduction)(axis=(1, 3)).transpose(2, 1, 0).reshape([-1, 2])],
+                ['a b c d e -> (e c a)', {},
+                 getattr(input, reduction)(axis=(1, 3)).transpose(2, 1, 0).reshape([-1])],
+                ['(a a2) ... -> (a2 a) ...', dict(a2=1),
+                 input],
             ]
             for pattern, axes_lengths, expected_result in test_cases:
                 result = reduce(backend.from_numpy(input.copy()), pattern, reduction=reduction, **axes_lengths)
@@ -190,8 +217,9 @@ def test_reduction_symbolic():
     for backend in sym_op_backends:
         print('Reduction tests for ', backend.framework_name)
         for reduction in _reductions:
-            input = numpy.arange(2 * 3 * 4 * 5 * 6, dtype='int64').reshape(2, 3, 4, 5, 6)
+            input = numpy.arange(2 * 3 * 4 * 5 * 6, dtype='int64').reshape([2, 3, 4, 5, 6])
             input = input / input.astype('float64').mean()
+            # slight redundancy for simpler order - numpy version is evaluated multiple times
             test_cases = [
                 ['a b c d e -> ', {},
                  getattr(input, reduction)()],
@@ -200,17 +228,17 @@ def test_reduction_symbolic():
                 ['(a a2) ... (e e2) -> ', dict(a2=1, e2=1),
                  getattr(input, reduction)()],
                 ['a b c d e -> (e c) a', {},
-                 getattr(input, reduction)(axis=(1, 3)).transpose(2, 1, 0).reshape(-1, 2)],
+                 getattr(input, reduction)(axis=(1, 3)).transpose(2, 1, 0).reshape([-1, 2])],
                 ['a ... c d e -> (e c) a', {},
-                 getattr(input, reduction)(axis=(1, 3)).transpose(2, 1, 0).reshape(-1, 2)],
+                 getattr(input, reduction)(axis=(1, 3)).transpose(2, 1, 0).reshape([-1, 2])],
                 ['a b c d e ... -> (e c) a', {},
-                 getattr(input, reduction)(axis=(1, 3)).transpose(2, 1, 0).reshape(-1, 2)],
+                 getattr(input, reduction)(axis=(1, 3)).transpose(2, 1, 0).reshape([-1, 2])],
                 ['a b c d e -> (e c a)', {},
-                 getattr(input, reduction)(axis=(1, 3)).transpose(2, 1, 0).reshape(-1)],
+                 getattr(input, reduction)(axis=(1, 3)).transpose(2, 1, 0).reshape([-1])],
                 ['(a a2) ... -> (a2 a) ...', dict(a2=1),
                  input],
             ]
-            for pattern, axes_lengths, expected_result in test_cases:
+            for pattern, axes_lengths, expected_numpy_result in test_cases:
                 shapes = [input.shape]
                 if backend.framework_name != 'mxnet.symbol':
                     # mxnet can't handle non-specified shapes
@@ -219,7 +247,7 @@ def test_reduction_symbolic():
                     sym = backend.create_symbol(shape)
                     result_sym = reduce(sym, pattern, reduction=reduction, **axes_lengths)
                     result = backend.eval_symbol(result_sym, [(sym, input)])
-                    assert numpy.allclose(result, expected_result)
+                    assert numpy.allclose(result, expected_numpy_result)
 
                 if True:
                     shape = []
@@ -234,7 +262,7 @@ def test_reduction_symbolic():
                     sym = backend.create_symbol(shape)
                     result_sym = reduce(sym, pattern, reduction=reduction, **_axes_lengths)
                     result = backend.eval_symbol(result_sym, [(sym, input)])
-                    assert numpy.allclose(result, expected_result)
+                    assert numpy.allclose(result, expected_numpy_result)
 
 
 def test_reduction_stress_imperatives():
@@ -255,7 +283,7 @@ def test_reduction_stress_imperatives():
                 pattern = left + '->' + right
                 x = numpy.arange(1, 1 + numpy.prod(shape), dtype=dtype).reshape(shape)
                 if reduction == 'prod':
-                    x /= x.mean()
+                    x /= x.mean()  # to avoid overflows
                 result1 = reduce(x, pattern, reduction=reduction)
                 result2 = x.transpose(permutation)
                 if skipped > 0:
@@ -267,136 +295,57 @@ def test_reduction_stress_imperatives():
                 check_op_against_numpy(backend, x, pattern, reduction=reduction, axes_lengths={}, is_symbolic=False)
 
 
-def test_rearrange_examples():
-    def test1(x):
-        # transpose
-        y = rearrange(x, 'b c h w -> b h w c')
-        assert y.shape == (10, 30, 40, 20)
-        return y
+def test_reduction_with_callable_imperatives():
+    x_numpy = numpy.arange(2 * 3 * 4 * 5 * 6).reshape([2, 3, 4, 5, 6]).astype('float32')
+    x_numpy /= x_numpy.max()
 
-    def test2(x):
-        # view / reshape
-        y = rearrange(x, 'b c h w -> b (c h w)')
-        assert y.shape == (10, 20 * 30 * 40)
-        return y
+    def logsumexp_torch(x, tuple_of_axes):
+        return x.logsumexp(tuple_of_axes)
 
-    def test3(x):
-        # depth-to-space
-        y = rearrange(x, 'b (c h1 w1) h w -> b c (h h1) (w w1)', h1=2, w1=2)
-        assert y.shape == (10, 5, 30 * 2, 40 * 2)
-        return y
+    def logsumexp_tf(x, tuple_of_axes):
+        import tensorflow as tf
+        return tf.reduce_logsumexp(x, tuple_of_axes)
 
-    def test4(x):
-        # space-to-depth
-        y = rearrange(x, 'b c (h h1) (w w1) -> b (h1 w1 c) h w', h1=2, w1=2)
-        assert y.shape == (10, 20 * 4, 30 // 2, 40 // 2)
-        return y
+    def logsumexp_chainer(x, tuple_of_axes):
+        import chainer
+        return chainer.functions.logsumexp(x, tuple_of_axes)
 
-    def test5(x):
-        # simple transposition
-        y = rearrange(x, 'b1 sound b2 letter -> b1 b2 sound letter')
-        assert y.shape == (10, 30, 20, 40)
-        return y
+    def logsumexp_keras(x, tuple_of_axes):
+        import keras.backend as k
+        return k.logsumexp(x, tuple_of_axes)
 
-    def test6(x):
-        # parsing parameters
-        t = rearrange(x, 'b c h w -> (b h w) c')
-        t = t[:, ::2]  # replacement for dot-product, just changes size of second axis
-        assert t.shape == (10 * 30 * 40, 10)
+    def logsumexp_numpy(x, tuple_of_axes):
+        # very naive logsumexp to compare to
+        minused = x.max(tuple_of_axes)
+        y = x - x.max(tuple_of_axes, keepdims=True)
+        y = numpy.exp(y)
+        y = numpy.sum(y, axis=tuple_of_axes)
+        return numpy.log(y) + minused
 
-        y = rearrange(t, '(b h w) c2 -> b c2 h w', **parse_shape(x, 'b _ h w'))
-        assert y.shape == (10, 10, 30, 40)
-        return y
-
-    def test7(x):
-        # split of embedding into groups
-        y1, y2 = rearrange(x, 'b (c g) h w -> g b c h w', g=2)
-        assert y1.shape == (10, 10, 30, 40)
-        assert y2.shape == (10, 10, 30, 40)
-        return y1 + y2  # only one tensor is expected in output
-
-    def test8(x):
-        # max-pooling
-        y = reduce(x, 'b c (h h1) (w w1) -> b c h w', reduction='max', h1=2, w1=2)
-        assert y.shape == (10, 20, 30 // 2, 40 // 2)
-        return y
-
-    def test9(x):
-        # squeeze - unsqueeze
-        y = reduce(x, 'b c h w -> b c () ()', reduction='max')
-        assert y.shape == (10, 20, 1, 1)
-        y = rearrange(y, 'b c () () -> c b')
-        assert y.shape == (20, 10)
-        return y
-
-    def test10(x):
-        # stack
-        tensors = list(x + 0)  # 0 is needed https://github.com/tensorflow/tensorflow/issues/23185
-        tensors = rearrange(tensors, 'b c h w -> b h w c')
-        assert tensors.shape == (10, 30, 40, 20)
-        return tensors
-
-    def test11(x):
-        # concatenate
-        tensors = list(x + 0)  # 0 is needed https://github.com/tensorflow/tensorflow/issues/23185
-        tensors = rearrange(tensors, 'b c h w -> h (b w) c')
-        assert tensors.shape == (30, 10 * 40, 20)
-        return tensors
-
-    def shufflenet(x, convolve, c1, c2):
-        # shufflenet reordering example
-        x = convolve(x)
-        x = rearrange(x, 'b (c1 c2) h w-> b (c2 c1) h w', c1=c1, c2=c2)
-        x = convolve(x)
-        return x
-
-    def convolve_strided_1d(x, stride, usual_convolution):
-        x = rearrange(x, 'b c t1 t2 -> b c (t1 t2)')  # reduce dimensionality
-        x = rearrange(x, 'b c (t stride) -> (stride b) c t', stride=stride)
-        x = usual_convolution(x)
-        x = rearrange(x, '(stride b) c t -> b c (t stride)', stride=stride)
-        return x
-
-    def convolve_strided_2d(x, h_stride, w_stride, usual_convolution):
-        x = rearrange(x, 'b c (h hs) (w ws) -> (hs ws b) c h w', hs=h_stride, ws=w_stride)
-        x = usual_convolution(x)
-        x = rearrange(x, '(hs ws b) c h w -> b c (h hs) (w ws)', hs=h_stride, ws=w_stride)
-        return x
-
-    def unet_like_1d(x, usual_convolution):
-        # u-net like steps for increasing / reducing dimensionality
-        x = rearrange(x, 'b c t1 t2 -> b c (t1 t2)')  # reduce dimensionality
-        y = rearrange(x, 'b c (t dt) -> b (dt c) t', dt=2)
-        y = usual_convolution(y)
-        x = x + rearrange(y, 'b (dt c) t -> b c (t dt)', dt=2)
-        return x
-
-    # mock for convolution (works for all backends)
-    convolve_mock = lambda x: x
-
-    tests = [test1, test2, test3, test4, test5, test6, test7, test8, test9, test10, test11,
-             lambda x: shufflenet(x, convolve=convolve_mock, c1=4, c2=5),
-             lambda x: convolve_strided_1d(x, stride=2, usual_convolution=convolve_mock),
-             lambda x: convolve_strided_2d(x, h_stride=2, w_stride=2, usual_convolution=convolve_mock),
-             lambda x: unet_like_1d(x, usual_convolution=convolve_mock),
-             ]
+    from einops._backends import TorchBackend, ChainerBackend, TensorflowBackend, KerasBackend, NumpyBackend
+    backend2callback = {
+        TorchBackend.framework_name: logsumexp_torch,
+        ChainerBackend.framework_name: logsumexp_chainer,
+        TensorflowBackend.framework_name: logsumexp_tf,
+        KerasBackend.framework_name: logsumexp_keras,
+        NumpyBackend.framework_name: logsumexp_numpy,
+    }
 
     for backend in imp_op_backends:
-        print('testing source_examples for ', backend.framework_name)
-        for test in tests:
-            x = numpy.arange(10 * 20 * 30 * 40).reshape([10, 20, 30, 40])
-            result1 = test(x)
-            result2 = backend.to_numpy(test(backend.from_numpy(x)))
-            assert numpy.array_equal(result1, result2)
+        if backend.framework_name not in backend2callback:
+            continue
 
-            # now with strides
-            x = numpy.arange(10 * 2 * 20 * 3 * 30 * 1 * 40).reshape([10 * 2, 20 * 3, 30 * 1, 40 * 1])
-            # known torch bug - torch doesn't support negative steps
-            last_step = -1 if backend.framework_name != 'torch' else 1
-            indexing_expression = numpy.index_exp[::2, ::3, ::1, ::last_step]
-            result1 = test(x[indexing_expression])
-            result2 = backend.to_numpy(test(backend.from_numpy(x)[indexing_expression]))
-            assert numpy.array_equal(result1, result2)
+        backend_callback = backend2callback[backend.framework_name]
+
+        x_backend = backend.from_numpy(x_numpy)
+        for pattern1, pattern2 in equivalent_reduction_patterns:
+            print('Test reduction with callable for ', backend.framework_name, pattern1, pattern2)
+            output_numpy = reduce(x_numpy, pattern1, reduction=logsumexp_numpy)
+            output_backend = reduce(x_backend, pattern1, reduction=backend_callback)
+            assert numpy.allclose(
+                output_numpy,
+                backend.to_numpy(output_backend),
+            )
 
 
 def test_enumerating_directions():
@@ -409,10 +358,11 @@ def test_enumerating_directions():
             x = numpy.arange(numpy.prod(shape)).reshape(shape)
             axes1 = _enumerate_directions(x)
             axes2 = _enumerate_directions(backend.from_numpy(x))
-            for axe1, axe2 in zip(axes1, axes2):
-                axe2 = backend.to_numpy(axe2)
-                assert axe1.shape == axe2.shape
-                assert numpy.allclose(axe1, axe2)
+            assert len(axes1) == len(axes2) == len(shape)
+            for ax1, ax2 in zip(axes1, axes2):
+                ax2 = backend.to_numpy(ax2)
+                assert ax1.shape == ax2.shape
+                assert numpy.allclose(ax1, ax2)
 
 
 def test_concatenations_and_stacking():
@@ -440,7 +390,7 @@ def test_concatenations_and_stacking():
 def test_gradients_imperatives():
     # lazy - just checking reductions
     for reduction in _reductions:
-        x = numpy.arange(1, 1 + 2 * 3 * 4).reshape(2, 3, 4).astype('float32')
+        x = numpy.arange(1, 1 + 2 * 3 * 4).reshape([2, 3, 4]).astype('float32')
         results = {}
         for backend in imp_op_backends:
             y0 = backend.from_numpy(x)
@@ -462,129 +412,6 @@ def test_gradients_imperatives():
         for name1, grad1 in results.items():
             for name2, grad2 in results.items():
                 assert numpy.allclose(grad1, grad2), [name1, name2, 'provided different gradients']
-
-
-def tensor_train_example_numpy():
-    # kept here just for a collection, only tested for numpy
-    # https://arxiv.org/pdf/1509.06569.pdf, (5)
-    x = numpy.ones([3, 4, 5, 6])
-    rank = 4
-    if numpy.__version__ < '1.15.0':
-        # numpy.einsum fails here, skip test
-        return
-    # creating appropriate Gs
-    Gs = [numpy.ones([d, d, rank, rank]) for d in x.shape]
-    Gs[0] = Gs[0][:, :, :1, :]
-    Gs[-1] = Gs[-1][:, :, :, :1]
-
-    # einsum way
-    y = x.reshape((1,) + x.shape)
-    for G in Gs:
-        # taking partial results left-to-right
-        # y = numpy.einsum('i j alpha beta, alpha i ...  -> beta ... j', G, y)
-        y = numpy.einsum('i j a b, a i ...  -> b ... j', G, y)
-    y1 = y.reshape(-1)
-
-    # alternative way
-    y = x.reshape(-1)
-    for G in Gs:
-        i, j, alpha, beta = G.shape
-        y = rearrange(y, '(i rest alpha) -> rest (alpha i)', alpha=alpha, i=i)
-        y = y @ rearrange(G, 'i j alpha beta -> (alpha i) (j beta)')
-        y = rearrange(y, 'rest (beta j) -> (beta rest j)', beta=beta, j=j)
-    y2 = y
-    assert numpy.allclose(y1, y2)
-
-    # yet another way
-    y = x
-    for G in Gs:
-        i, j, alpha, beta = G.shape
-        y = rearrange(y, 'i ... (j alpha) -> ... j (alpha i)', alpha=alpha, i=i)
-        y = y @ rearrange(G, 'i j alpha beta -> (alpha i) (j beta)')
-    y3 = y.reshape(-1)
-    assert numpy.allclose(y1, y3)
-
-
-def test_pytorch_yolo_fragment():
-    if not any(b.framework_name == 'torch' for b in collect_test_backends(symbolic=False, layers=False)):
-        return
-    import torch
-
-    def old_way(input, num_classes, num_anchors, anchors, stride_h, stride_w):
-        # https://github.com/BobLiu20/YOLOv3_PyTorch/blob/c6b483743598b5f64d520d81e7e5f47ba936d4c9/nets/yolo_loss.py#L28-L44
-        bs = input.size(0)
-        in_h = input.size(2)
-        in_w = input.size(3)
-        scaled_anchors = [(a_w / stride_w, a_h / stride_h) for a_w, a_h in anchors]
-
-        prediction = input.view(bs, num_anchors,
-                                5 + num_classes, in_h, in_w).permute(0, 1, 3, 4, 2).contiguous()
-        # Get outputs
-        x = torch.sigmoid(prediction[..., 0])  # Center x
-        y = torch.sigmoid(prediction[..., 1])  # Center y
-        w = prediction[..., 2]  # Width
-        h = prediction[..., 3]  # Height
-        conf = torch.sigmoid(prediction[..., 4])  # Conf
-        pred_cls = torch.sigmoid(prediction[..., 5:])  # Cls pred.
-
-        # https://github.com/BobLiu20/YOLOv3_PyTorch/blob/c6b483743598b5f64d520d81e7e5f47ba936d4c9/nets/yolo_loss.py#L70-L92
-        FloatTensor = torch.cuda.FloatTensor if x.is_cuda else torch.FloatTensor
-        LongTensor = torch.cuda.LongTensor if x.is_cuda else torch.LongTensor
-        # Calculate offsets for each grid
-        grid_x = torch.linspace(0, in_w - 1, in_w).repeat(in_w, 1).repeat(
-            bs * num_anchors, 1, 1).view(x.shape).type(FloatTensor)
-        grid_y = torch.linspace(0, in_h - 1, in_h).repeat(in_h, 1).t().repeat(
-            bs * num_anchors, 1, 1).view(y.shape).type(FloatTensor)
-        # Calculate anchor w, h
-        anchor_w = FloatTensor(scaled_anchors).index_select(1, LongTensor([0]))
-        anchor_h = FloatTensor(scaled_anchors).index_select(1, LongTensor([1]))
-        anchor_w = anchor_w.repeat(bs, 1).repeat(1, 1, in_h * in_w).view(w.shape)
-        anchor_h = anchor_h.repeat(bs, 1).repeat(1, 1, in_h * in_w).view(h.shape)
-        # Add offset and scale with anchors
-        pred_boxes = FloatTensor(prediction[..., :4].shape)
-        pred_boxes[..., 0] = x.data + grid_x
-        pred_boxes[..., 1] = y.data + grid_y
-        pred_boxes[..., 2] = torch.exp(w.data) * anchor_w
-        pred_boxes[..., 3] = torch.exp(h.data) * anchor_h
-        # Results
-        _scale = torch.Tensor([stride_w, stride_h] * 2).type(FloatTensor)
-        output = torch.cat((pred_boxes.view(bs, -1, 4) * _scale,
-                            conf.view(bs, -1, 1), pred_cls.view(bs, -1, num_classes)), -1)
-        return output
-
-    def new_way(input, num_classes, num_anchors, anchors, stride_h, stride_w):
-        raw_predictions = rearrange(input, ' b (anchor prediction) h w -> prediction b anchor h w', anchor=num_anchors)
-
-        anchors = torch.FloatTensor(anchors).to(input.device)
-        anchor_sizes = rearrange(anchors, 'anchor dim -> dim () anchor () ()')
-
-        _, _, _, in_h, in_w = raw_predictions.shape
-        grid_h = rearrange(torch.arange(in_h).float(), 'h -> () () h ()').to(input.device)
-        grid_w = rearrange(torch.arange(in_w).float(), 'w -> () () () w').to(input.device)
-
-        predicted_bboxes = torch.zeros_like(raw_predictions)
-        predicted_bboxes[0] = (raw_predictions[0].sigmoid() + grid_h) * stride_h  # center y
-        predicted_bboxes[1] = (raw_predictions[1].sigmoid() + grid_w) * stride_w  # center x
-        predicted_bboxes[2:4] = (raw_predictions[2:4].exp()) * anchor_sizes  # bbox width and height
-        predicted_bboxes[4] = raw_predictions[4].sigmoid()  # confidence
-        predicted_bboxes[5:] = raw_predictions[5:].sigmoid()  # class predictions
-        # only to match results of original code, not needed
-        return rearrange(predicted_bboxes, 'prediction b anchor h w -> b anchor h w prediction')
-
-    stride_h = 4
-    stride_w = 4
-    batch_size = 5
-    num_classes = 12
-    anchors = [[50, 100], [100, 50], [75, 75]]
-    num_anchors = len(anchors)
-
-    input = torch.randn([batch_size, num_anchors * (5 + num_classes), 1, 1])
-    result1 = old_way(input=input, num_anchors=num_anchors, num_classes=num_classes,
-                      stride_h=stride_h, stride_w=stride_w, anchors=anchors)
-    result2 = new_way(input=input, num_anchors=num_anchors, num_classes=num_classes,
-                      stride_h=stride_h, stride_w=stride_w, anchors=anchors)
-    result1 = result1.reshape(result2.shape)
-    assert torch.allclose(result1, result2)
 
 
 def test_tiling_imperatives():
@@ -638,26 +465,28 @@ repeat_test_cases = [
 ]
 
 
+def check_reversion(x, repeat_pattern, **sizes):
+    """Checks repeat pattern by running reduction """
+    left, right = repeat_pattern.split('->')
+    reduce_pattern = right + '->' + left
+    repeated = reduce(x, repeat_pattern, reduction='repeat', **sizes)
+    reduced_min = reduce(repeated, reduce_pattern, reduction='min', **sizes)
+    reduced_max = reduce(repeated, reduce_pattern, reduction='max', **sizes)
+    assert numpy.array_equal(x, reduced_min)
+    assert numpy.array_equal(x, reduced_max)
+
+
 def test_repeat_numpy():
-    x = numpy.arange(2 * 3 * 5).reshape(2, 3, 5)
+    # check repeat vs reduce. Repeat works ok if reverse reduction with min and max work well
+    x = numpy.arange(2 * 3 * 5).reshape([2, 3, 5])
     x1 = reduce(x, 'a b c -> copy a b c ', reduction='repeat', copy=1)
     assert numpy.array_equal(x[None], x1)
-
-    def check_reversion(x, repeat_pattern, **sizes):
-        left, right = repeat_pattern.split('->')
-        reduce_pattern = right + '->' + left
-        repeated = reduce(x, repeat_pattern, reduction='repeat', **sizes)
-        reduced_min = reduce(repeated, reduce_pattern, reduction='min', **sizes)
-        reduced_max = reduce(repeated, reduce_pattern, reduction='max', **sizes)
-        assert numpy.array_equal(x, reduced_min)
-        assert numpy.array_equal(x, reduced_max)
-
     for pattern, axis_dimensions in repeat_test_cases:
         check_reversion(x, pattern, **axis_dimensions)
 
 
 def test_repeat_imperatives():
-    x = numpy.arange(2 * 3 * 5).reshape(2, 3, 5)
+    x = numpy.arange(2 * 3 * 5).reshape([2, 3, 5])
     for backend in imp_op_backends:
         print('Repeat tests for ', backend.framework_name)
 
@@ -670,7 +499,7 @@ def test_repeat_imperatives():
 
 
 def test_repeat_symbolic():
-    x = numpy.arange(2 * 3 * 5).reshape(2, 3, 5)
+    x = numpy.arange(2 * 3 * 5).reshape([2, 3, 5])
 
     for backend in sym_op_backends:
         print('Repeat tests for ', backend.framework_name)
@@ -681,3 +510,21 @@ def test_repeat_symbolic():
             sym = backend.create_symbol(x.shape)
             result = backend.eval_symbol(reduce(sym, pattern, reduction='repeat', **axis_dimensions), [[sym, x]])
             assert numpy.array_equal(result, expected)
+
+
+test_cases_repeat_anonymous = [
+    # all assume that input has shape [1, 2, 4, 6]
+    ('a b c d -> c a d b', dict()),
+    ('a b c d -> (c 2 d a b)', dict(a=1, c=4, d=6)),
+    ('1 b c d -> (d copy 1) 3 b c ', dict(copy=3)),
+    ('1 ...  -> 3 ... ', dict()),
+    ('() ... d -> 1 (copy1 d copy2) ... ', dict(copy1=2, copy2=3)),
+    ('1 b c d -> (1 1) (1 b) 2 c 3 d (1 1)', dict()),
+
+]
+
+
+def test_anonymous_axes():
+    x = numpy.arange(1 * 2 * 4 * 6).reshape([1, 2, 4, 6])
+    for pattern, axis_dimensions in test_cases_repeat_anonymous:
+        check_reversion(x, pattern, **axis_dimensions)

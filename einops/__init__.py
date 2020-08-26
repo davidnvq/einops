@@ -1,6 +1,12 @@
-__author__ = 'Alex Rogozhnikov'
-__version__ = '0.2.1'
-__all__ = ['rearrange', 'reduce', 'parse_shape', 'asnumpy', 'EinopsError', 'redim', 'concat', 'transpose']
+__version__ = '0.2.0'
 
-from .einops import rearrange, reduce, repeat, parse_shape, asnumpy, EinopsError
+
+class EinopsError(RuntimeError):
+    """ Runtime error thrown by einops """
+    pass
+
+
+__all__ = ['rearrange', 'reduce', 'parse_shape', 'asnumpy', 'EinopsError']
+__all__ += ['redim', 'concat', 'transpose']
+from .einops import rearrange, reduce, repeat, parse_shape, asnumpy
 from .einops import redim, concat, transpose

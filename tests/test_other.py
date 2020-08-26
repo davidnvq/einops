@@ -1,12 +1,13 @@
 import sys
+from doctest import testmod
+
 import numpy
 
 import einops
 import einops.layers
-
-from doctest import testmod
-from einops.einops import (rearrange, parse_shape, _optimize_transformation, _check_elementary_axis_name)
+import einops.parsing
 from einops._backends import AbstractBackend
+from einops.einops import rearrange, parse_shape, _optimize_transformation
 from . import collect_test_backends
 
 __author__ = 'Alex Rogozhnikov'
@@ -66,13 +67,6 @@ def test_optimize_transformations_numpy():
             combination3 = _optimize_transformation(*combination2)
             for a, b in zip(combination2, combination3):
                 assert numpy.array_equal(a, b)
-
-
-def test_elementary_axis_name():
-    for name in ['a', 'b', 'h', 'dx', 'h1', 'zz', 'i9123', 'somelongname']:
-        assert _check_elementary_axis_name(name)
-    for name in ['', '2b', 'Alex', 'camelCase', 'under_score', '12']:
-        assert not _check_elementary_axis_name(name)
 
 
 def test_parse_shape_imperative():

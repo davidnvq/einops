@@ -67,6 +67,7 @@ To obtain the latest github version
 ```bash
 pip install https://github.com/arogozhnikov/einops/archive/master.zip
 ```
+-->
 
 ```bash
 # support operations on dimension
