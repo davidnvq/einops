@@ -183,14 +183,12 @@ def parse_expression(expression: str) -> Tuple[List[str], List[CompositeAxis]]:
             if current_identifier is None:
                 raise EinopsError("Axis name can't start with a digit")
             current_identifier += char
-        elif 'a' <= char <= 'z':
+        elif 'a' <= char <= 'z' or 'A' <= char <= 'Z' or char in ['_', _ellipsis]:
             if current_identifier is None:
                 current_identifier = char
             else:
                 current_identifier += char
         else:
-            if 'A' <= char <= 'Z':
-                raise EinopsError("Only lower-case latin letters allowed in names, not '{}'".format(char))
             raise EinopsError("Unknown character '{}'".format(char))
 
     if bracket_group is not None:
