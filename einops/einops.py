@@ -646,7 +646,7 @@ def _split_pattern(pattern: str):
 
 
 def concat(tensor_list, pattern, **axes_lengths: int):
-    """This perform the concatenation of tensors along 1 axis.
+    """This performs the concatenation of tensors along 1 axis.
     Args:
         tensor_list:(List[torch.Tensor/np.Array]) list of tensors have same length on all dimensions (except concat dim)
         pattern: (str) pattern to redimension, e.g., "batch seq [dx dy dz -> (dx dy dz)]"
@@ -655,7 +655,7 @@ def concat(tensor_list, pattern, **axes_lengths: int):
         a concatenated tensor
 
     Note that:
-    1. Except the concatenated axis, the lengths of the other axes must be the same.
+    1. Except for the concatenated axis, the lengths of the other axes must be the same.
     2. It is not necessary for all tensors to have the same length, they can be different.
     3. We DONT need to specify all the lengths of dimensions.
 
@@ -740,9 +740,9 @@ def concat(tensor_list, pattern, **axes_lengths: int):
 
 
 def redim(tensor, pattern, **axes_lengths: int):
-    """This perform redimension elements on 1 specific dimension, e.g., chunking or reordering.
+    """This performs redimension elements on 1 specific dimension, e.g., chunking or reordering.
     The operation is performed by the pattern within the bracket.
-    Note that: It only supports a single pattern so far, and there must be a single group/elem on that dimension
+    Note that: It only supports a single pattern so far, and there must be a single group/element on that dimension
 
     Args:
         tensor: (torch.Tensor or np.Array)
